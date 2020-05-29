@@ -1,3 +1,6 @@
+#Microsoft.RDInfra.RDPowerShell and Get-Package both require powershell 5.0 or higher.
+#Requires -Version 5.0
+
 <#
 .SYNOPSIS
 Common functions to be used by DSC scripts
@@ -326,5 +329,164 @@ function IsRDAgentRegistryValidForRegistration {
     
     return @{
         result = $true
+    }
+}
+
+function RunMsiWithRetry {
+    param(
+        [Parameter(mandatory = $true)]
+        [string]$programDisplayName,
+
+        [Parameter(mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [String[]]$argumentList, #Must have at least 1 value
+
+        [Parameter(mandatory = $true)]
+        [string]$msiOutputLogPath,
+
+        [Parameter(mandatory = $false)]
+        [switch]$isUninstall,
+
+        [Parameter(mandatory = $false)]
+        [switch]$msiLogVerboseOutput
+    )
+    Set-StrictMode -Version Latest
+
+    if ($msiLogVerboseOutput) {
+        $argumentList += "/l*vx $msiOutputLogPath" 
+    }
+    else {
+        $argumentList += "/l* $msiOutputLogPath"
+    }
+
+    $retryTimeToSleepInSec = 30
+    $retryCount = 0
+    do {
+        $modeAndDisplayName = ($(if ($isUninstall) { "Uninstalling" } else { "Installing" }) + " $programDisplayName")
+
+        if ($retryCount -gt 0) {
+            Write-Log -Message "Retrying $modeAndDisplayName in $retryTimeToSleepInSec seconds because it failed with Exit code=$sts This will be retry number $retryCount"
+            Start-Sleep -Seconds $retryTimeToSleepInSec
+        }
+
+        Write-Log -Message ( "$modeAndDisplayName" + $(if ($msiLogVerboseOutput) { " with verbose msi logging" } else { "" }))
+
+
+        $processResult = Start-Process -FilePath "msiexec.exe" -ArgumentList $argumentList -Wait -Passthru
+        $sts = $processResult.ExitCode
+
+        $retryCount++
+    } 
+    while ($sts -eq 1618 -and $retryCount -lt 20) # Error code 1618 is ERROR_INSTALL_ALREADY_RUNNING see https://docs.microsoft.com/en-us/windows/win32/msi/-msiexecute-mutex .
+
+    if ($sts -eq 1618) {
+        Write-Log -Message "Stopping retries for $modeAndDisplayName. The last attempt failed with Exit code=$sts"
+        if (-not $isUninstall) {
+            throw "Stopping because $modeAndDisplayName finished with Exit code=$sts"
+        }
+    }
+    else {
+        Write-Log -Message "$modeAndDisplayName finished with Exit code=$sts"
+    }
+} 
+
+<#
+.DESCRIPTION
+Uninstalls any existing RDAgent BootLoader and RD Infra Agent installations and then installs the RDAgent BootLoader and RD Infra Agent using the specified registration token.
+
+.PARAMETER AgentInstallerFolder
+Required path to MSI installer file
+
+.PARAMETER AgentBootServiceInstallerFolder
+Required path to MSI installer file
+
+.PARAMETER StartAgent
+Start the agent service (RDAgentBootLoader) immediately
+#>
+function InstallRDAgents {
+    Param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$AgentInstallerFolder,
+        
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$AgentBootServiceInstallerFolder,
+    
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [string]$RegistrationToken,
+    
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [bool]$StartAgent,
+    
+        [Parameter(mandatory = $false)]
+        [switch]$EnableVerboseMsiLogging
+    )
+
+    # Convert relative paths to absolute paths if needed
+    Write-Log -Message "Boot loader folder is $AgentBootServiceInstallerFolder"
+    $AgentBootServiceInstaller = (Get-ChildItem $AgentBootServiceInstallerFolder\ -Filter *.msi | Select-Object).FullName
+    if ((-not $AgentBootServiceInstaller) -or (-not (Test-Path $AgentBootServiceInstaller))) {
+        throw "RD Infra Agent Installer package is not found '$AgentBootServiceInstaller'"
+    }
+
+    # Convert relative paths to absolute paths if needed
+    Write-Log -Message "Agent folder is $AgentInstallerFolder"
+    $AgentInstaller = (Get-ChildItem $AgentInstallerFolder\ -Filter *.msi | Select-Object).FullName
+    if ((-not $AgentInstaller) -or (-not (Test-Path $AgentInstaller))) {
+        throw "RD Infra Agent Installer package is not found '$AgentInstaller'"
+    }
+
+    if (!$RegistrationToken) {
+        throw "No registration token specified"
+    }
+
+    RunMsiWithRetry -programDisplayName "RDAgentBootLoader" -isUninstall -argumentList @("/x {A38EE409-424D-4A0D-B5B6-5D66F20F62A5}", "/quiet", "/qn", "/norestart", "/passive") -msiOutputLogPath "C:\Users\AgentBootLoaderUnInstall.txt" -msiLogVerboseOutput:$EnableVerboseMsiLogging
+
+    while ($true) {
+        try {
+            $oldAgent = Get-Package -ProviderName msi -Name "Remote Desktop Services Infrastructure Agent" -ErrorAction Stop
+        }
+        catch {
+            #Ignore the error if it was due to no packages being found.
+            if ($_.FullyQualifiedErrorId -eq "NoMatchFound,Microsoft.PowerShell.PackageManagement.Cmdlets.GetPackage") {
+                break
+            }
+
+            throw;
+        }
+
+        $oldVersion = $oldAgent.Version
+        $productCodeParameter = $oldAgent.FastPackageReference
+
+        RunMsiWithRetry -programDisplayName "RD Infra Agent $oldVersion" -isUninstall -argumentList @("/x $productCodeParameter", "/quiet", "/qn", "/norestart", "/passive") -msiOutputLogPath "C:\Users\AgentUninstall.txt" -msiLogVerboseOutput:$EnableVerboseMsiLogging
+    }
+
+
+    Write-Log -Message "Installing RD Infra Agent on VM $AgentInstaller"
+    RunMsiWithRetry -programDisplayName "RD Infra Agent" -argumentList @("/i $AgentInstaller", "/quiet", "/qn", "/norestart", "/passive", "REGISTRATIONTOKEN=$RegistrationToken") -msiOutputLogPath "C:\Users\AgentInstall.txt" -msiLogVerboseOutput:$EnableVerboseMsiLogging
+
+    Write-Log -Message "Installing RDAgent BootLoader on VM $AgentBootServiceInstaller"
+    RunMsiWithRetry -programDisplayName "RDAgent BootLoader" -argumentList @("/i $AgentBootServiceInstaller", "/quiet", "/qn", "/norestart", "/passive") -msiOutputLogPath "C:\Users\AgentBootLoaderInstall.txt" -msiLogVerboseOutput:$EnableVerboseMsiLogging
+
+    if ($StartAgent) {
+        $bootloaderServiceName = "RDAgentBootLoader"
+        $startBootloaderRetryCount = 0
+        while ( -not (Get-Service $bootloaderServiceName -ErrorAction SilentlyContinue)) {
+            $retry = ($startBootloaderRetryCount -lt 6)
+            Write-Log -Message $("Service $bootloaderServiceName was not found. " + $(if ($retry) { "Retrying again in 30 seconds, this will be retry $startBootloaderRetryCount" } else { "Retry limit exceeded" }) )
+            
+            if (-not $retry ) {
+                break
+            }
+        
+            $startBootloaderRetryCount++
+            Start-Sleep -Seconds 30
+        }
+
+        Write-Log -Message "Starting service $bootloaderServiceName"
+        Start-Service $bootloaderServiceName -ErrorAction Stop
     }
 }
