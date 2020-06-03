@@ -40,8 +40,8 @@ param(
     [Parameter(mandatory = $false)]
     [string]$RDPSModSource = 'attached',
 
-    [Parameter(mandatory = $true)]
-    [string]$EnableVerboseMsiLogging
+    [Parameter(mandatory = $false)]
+    [switch]$EnableVerboseMsiLogging
 )
 
 $ScriptPath = [System.IO.Path]::GetDirectoryName($PSCommandPath)
@@ -98,7 +98,7 @@ else {
 
 Write-Log "AgentInstaller is $DeployAgentLocation\RDAgentBootLoaderInstall, InfraInstaller is $DeployAgentLocation\RDInfraAgentInstall"
 
-InstallRDAgents -AgentBootServiceInstallerFolder "$DeployAgentLocation\RDAgentBootLoaderInstall" -AgentInstallerFolder "$DeployAgentLocation\RDInfraAgentInstall" -RegistrationToken $Registered.Token -StartAgent $true -EnableVerboseMsiLogging:($EnableVerboseMsiLogging -eq 'True')
+InstallRDAgents -AgentBootServiceInstallerFolder "$DeployAgentLocation\RDAgentBootLoaderInstall" -AgentInstallerFolder "$DeployAgentLocation\RDInfraAgentInstall" -RegistrationToken $Registered.Token -EnableVerboseMsiLogging:$EnableVerboseMsiLogging
 
 Write-Log -Message "The agent installation code was successfully executed and RDAgentBootLoader, RDAgent installed inside VM for existing hostpool: $HostPoolName"
 

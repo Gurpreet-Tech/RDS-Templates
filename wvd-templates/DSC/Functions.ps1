@@ -118,7 +118,7 @@ function ExtractDeploymentAgentZipFile {
     New-Item -Path "$DeployAgentLocation" -ItemType directory -Force
     
     # Locating and extracting DeployAgent.zip
-    $DeployAgentFromRepo = (LocateFile -Name 'DeployAgent.zip' -SearchPath $ScriptPath)
+    $DeployAgentFromRepo = (LocateFile -Name 'DeployAgent.zip' -SearchPath $ScriptPath -Recurse)
     
     Write-Log -Message "Extracting 'Deployagent.zip' file into '$DeployAgentLocation' folder inside VM"
     Expand-Archive $DeployAgentFromRepo -DestinationPath "$DeployAgentLocation"
@@ -223,12 +223,12 @@ function LocateFile {
     param (
         [Parameter(mandatory = $true)]
         [string]$Name,
-
-        [string]$SearchPath = '.'
+        [string]$SearchPath = '.',
+        [switch]$Recurse
     )
     
     Write-Log -Message "Locating '$Name' within: '$SearchPath'"
-    $Path = (Get-ChildItem "$SearchPath\" -Filter $Name -Recurse).FullName
+    $Path = (Get-ChildItem "$SearchPath\" -Filter $Name -Recurse:$Recurse).FullName
     if ((-not $Path) -or (-not (Test-Path $Path))) {
         throw "'$Name' file not found at '$SearchPath'"
     }
@@ -265,7 +265,7 @@ function ImportRDPSMod {
         }
 
         # Locating and extracting PowerShellModules.zip
-        $ZipPath = (LocateFile -Name 'PowerShellModules.zip' -SearchPath $ArtifactsPath)
+        $ZipPath = (LocateFile -Name 'PowerShellModules.zip' -SearchPath $ArtifactsPath -Recurse)
 
         Write-Log -Message "Extracting RD PowerShell module file '$ZipPath' into '$Path'"
         Expand-Archive $ZipPath -DestinationPath $Path -Force
@@ -287,7 +287,7 @@ function ImportRDPSMod {
         Write-Log -Message "Successfully downloaded RD PowerShell module (version: v$Version) from PowerShell Gallery into '$Path'"
     }
 
-    $DLLPath = (LocateFile -Name "$ModName.dll" -SearchPath $Path)
+    $DLLPath = (LocateFile -Name "$ModName.dll" -SearchPath $Path -Recurse)
 
     Write-Log -Message "Importing RD PowerShell module DLL '$DLLPath"
     Import-Module $DLLPath -Force
@@ -351,6 +351,7 @@ function RunMsiWithRetry {
         [switch]$msiLogVerboseOutput
     )
     Set-StrictMode -Version Latest
+    $ErrorActionPreference = "Stop"
 
     if ($msiLogVerboseOutput) {
         $argumentList += "/l*vx $msiOutputLogPath" 
@@ -361,6 +362,7 @@ function RunMsiWithRetry {
 
     $retryTimeToSleepInSec = 30
     $retryCount = 0
+    $sts = $null
     do {
         $modeAndDisplayName = ($(if ($isUninstall) { "Uninstalling" } else { "Installing" }) + " $programDisplayName")
 
@@ -380,14 +382,14 @@ function RunMsiWithRetry {
     while ($sts -eq 1618 -and $retryCount -lt 20) # Error code 1618 is ERROR_INSTALL_ALREADY_RUNNING see https://docs.microsoft.com/en-us/windows/win32/msi/-msiexecute-mutex .
 
     if ($sts -eq 1618) {
-        Write-Log -Message "Stopping retries for $modeAndDisplayName. The last attempt failed with Exit code=$sts"
-        if (-not $isUninstall) {
-            throw "Stopping because $modeAndDisplayName finished with Exit code=$sts"
-        }
+        Write-Log -Err "Stopping retries for $modeAndDisplayName. The last attempt failed with Exit code=$sts which is ERROR_INSTALL_ALREADY_RUNNING"
+        throw "Stopping because $modeAndDisplayName finished with Exit code=$sts"
     }
     else {
         Write-Log -Message "$modeAndDisplayName finished with Exit code=$sts"
     }
+
+    return $sts
 } 
 
 <#
@@ -399,9 +401,6 @@ Required path to MSI installer file
 
 .PARAMETER AgentBootServiceInstallerFolder
 Required path to MSI installer file
-
-.PARAMETER StartAgent
-Start the agent service (RDAgentBootLoader) immediately
 #>
 function InstallRDAgents {
     Param(
@@ -413,31 +412,21 @@ function InstallRDAgents {
         [ValidateNotNullOrEmpty()]
         [string]$AgentBootServiceInstallerFolder,
     
-        [Parameter(Mandatory = $false)]
+        [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
         [string]$RegistrationToken,
-    
-        [Parameter(Mandatory = $false)]
-        [ValidateNotNullOrEmpty()]
-        [bool]$StartAgent,
     
         [Parameter(mandatory = $false)]
         [switch]$EnableVerboseMsiLogging
     )
 
-    # Convert relative paths to absolute paths if needed
-    Write-Log -Message "Boot loader folder is $AgentBootServiceInstallerFolder"
-    $AgentBootServiceInstaller = (Get-ChildItem $AgentBootServiceInstallerFolder\ -Filter *.msi | Select-Object).FullName
-    if ((-not $AgentBootServiceInstaller) -or (-not (Test-Path $AgentBootServiceInstaller))) {
-        throw "RD Infra Agent Installer package is not found '$AgentBootServiceInstaller'"
-    }
+    $ErrorActionPreference = "Stop"
 
-    # Convert relative paths to absolute paths if needed
+    Write-Log -Message "Boot loader folder is $AgentBootServiceInstallerFolder"
+    $AgentBootServiceInstaller = LocateFile -SearchPath $AgentBootServiceInstallerFolder -Name "*.msi"
+
     Write-Log -Message "Agent folder is $AgentInstallerFolder"
-    $AgentInstaller = (Get-ChildItem $AgentInstallerFolder\ -Filter *.msi | Select-Object).FullName
-    if ((-not $AgentInstaller) -or (-not (Test-Path $AgentInstaller))) {
-        throw "RD Infra Agent Installer package is not found '$AgentInstaller'"
-    }
+    $AgentInstaller = LocateFile -SearchPath $AgentInstallerFolder -Name "*.msi"
 
     if (!$RegistrationToken) {
         throw "No registration token specified"
@@ -447,11 +436,11 @@ function InstallRDAgents {
 
     while ($true) {
         try {
-            $oldAgent = Get-Package -ProviderName msi -Name "Remote Desktop Services Infrastructure Agent" -ErrorAction Stop
+            $oldAgent = Get-Package -ProviderName msi -Name "Remote Desktop Services Infrastructure Agent"
         }
         catch {
             #Ignore the error if it was due to no packages being found.
-            if ($_.FullyQualifiedErrorId -eq "NoMatchFound,Microsoft.PowerShell.PackageManagement.Cmdlets.GetPackage") {
+            if ($PSItem.FullyQualifiedErrorId -eq "NoMatchFound,Microsoft.PowerShell.PackageManagement.Cmdlets.GetPackage") {
                 break
             }
 
@@ -471,22 +460,25 @@ function InstallRDAgents {
     Write-Log -Message "Installing RDAgent BootLoader on VM $AgentBootServiceInstaller"
     RunMsiWithRetry -programDisplayName "RDAgent BootLoader" -argumentList @("/i $AgentBootServiceInstaller", "/quiet", "/qn", "/norestart", "/passive") -msiOutputLogPath "C:\Users\AgentBootLoaderInstall.txt" -msiLogVerboseOutput:$EnableVerboseMsiLogging
 
-    if ($StartAgent) {
-        $bootloaderServiceName = "RDAgentBootLoader"
-        $startBootloaderRetryCount = 0
-        while ( -not (Get-Service $bootloaderServiceName -ErrorAction SilentlyContinue)) {
-            $retry = ($startBootloaderRetryCount -lt 6)
-            Write-Log -Message $("Service $bootloaderServiceName was not found. " + $(if ($retry) { "Retrying again in 30 seconds, this will be retry $startBootloaderRetryCount" } else { "Retry limit exceeded" }) )
-            
-            if (-not $retry ) {
-                break
-            }
-        
-            $startBootloaderRetryCount++
-            Start-Sleep -Seconds 30
+    $bootloaderServiceName = "RDAgentBootLoader"
+    $startBootloaderRetryCount = 0
+    while ( -not (Get-Service $bootloaderServiceName -ErrorAction SilentlyContinue)) {
+        $retry = ($startBootloaderRetryCount -lt 6)
+        $msgToWrite = "Service $bootloaderServiceName was not found. "
+        if ($retry) { 
+            $msgToWrite += "Retrying again in 30 seconds, this will be retry $startBootloaderRetryCount" 
+            Write-Log -Message $msgToWrite
+        } 
+        else {
+            $msgToWrite += "Retry limit exceeded" 
+            Write-Log -Err $msgToWrite
+            throw $msgToWrite
         }
-
-        Write-Log -Message "Starting service $bootloaderServiceName"
-        Start-Service $bootloaderServiceName -ErrorAction Stop
+            
+        $startBootloaderRetryCount++
+        Start-Sleep -Seconds 30
     }
+
+    Write-Log -Message "Starting service $bootloaderServiceName"
+    Start-Service $bootloaderServiceName
 }

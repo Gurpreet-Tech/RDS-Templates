@@ -44,7 +44,7 @@ configuration CreateHostPoolAndRegisterSessionHost
         [string]$RDPSModSource = 'attached',
 
         [Parameter(mandatory = $false)]
-        [string]$EnableVerboseMsiLogging = "False"
+        [bool]$EnableVerboseMsiLogging = $false
     )
 
     $ErrorActionPreference = 'Stop'
@@ -165,7 +165,7 @@ configuration RegisterSessionHost
         [string]$RDPSModSource = 'attached',
 
         [Parameter(mandatory = $false)]
-        [string]$EnableVerboseMsiLogging = "False"
+        [bool]$EnableVerboseMsiLogging = $false
     )
 
     $ErrorActionPreference = 'Stop'
@@ -282,7 +282,7 @@ configuration RegisterSessionHostAndCleanup
         [string]$RDPSModSource = 'attached',
 
         [Parameter(mandatory = $false)]
-        [string]$EnableVerboseMsiLogging = "False"
+        [bool]$EnableVerboseMsiLogging = $false
     )
 
     $ErrorActionPreference = 'Stop'
